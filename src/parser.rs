@@ -1,7 +1,8 @@
 use crate::lex::{Token, TokenType};
 use crate::ast::{Expr, Stmt, BinaryOp, UnaryOp};
-use miette::{Diagnostic, Result, SourceSpan};
+use miette::{Diagnostic, Result, SourceSpan, Report};
 use thiserror::Error;
+
 
 #[derive(Error, Diagnostic, Debug)]
 pub enum ParseError {
@@ -42,15 +43,10 @@ pub enum ParseError {
 pub enum Precedence {
     None = 0,
     Assignment = 1,
-    Or = 2,
-    And = 3,
-    Equality = 4,
-    Comparison = 5,
-    Term = 6,
-    Factor = 7,
-    Unary = 8,
-    Call = 9,
-    Primary = 10,
+    Term = 2,
+    Factor = 3,
+    Unary = 4,
+    Call = 5,
 }
 
 pub struct Parser<'de> {
@@ -75,7 +71,7 @@ impl<'de> Parser<'de> {
                 Ok(stmt) => statements.push(stmt),
                 Err(e) => {
                     self.synchronize();
-                    return Err(e);
+                    return Err(e.into());
                 }
             }
         }
@@ -107,8 +103,7 @@ impl<'de> Parser<'de> {
             let mut params = Vec::new();
             if !self.check(&TokenType::RParen) {
                 loop {
-                    let param = self.consume_identifier()?;
-                    params.push(param);
+                    params.push(self.consume_identifier()?);
                     if !self.match_token(&[TokenType::Comma]) {
                         break;
                     }
@@ -116,8 +111,16 @@ impl<'de> Parser<'de> {
             }
             self.consume(TokenType::RParen)?;
             self.consume(TokenType::LBrace)?;
-            let body = Box::new(self.parse_statement()?);
-            Ok(Stmt::FnDecl { name, params, body })
+            let mut body_stmts = Vec::new();
+            while !self.check(&TokenType::RBrace) && !self.is_at_end() {
+                body_stmts.push(self.parse_statement()?);
+            }
+            self.consume(TokenType::RBrace)?;
+            Ok(Stmt::FnDecl {
+                name,
+                params,
+                body: Box::new(Stmt::Block(body_stmts)),
+            })
         } else if self.check_identifier("return") {
             self.advance();
             let expr = if !self.check(&TokenType::Semicolon) {
@@ -161,9 +164,9 @@ impl<'de> Parser<'de> {
         let token = self.advance_or_eof()?;
 
         if !self.has_prefix_rule(&token.kind) {
-            return Err(ParseError::InvalidExpression {
+            return Err(Report::new(ParseError::InvalidExpression {
                 span: SourceSpan::from(token.offset..token.offset + 1),
-            }.into());
+            }));
         }
 
         let mut left = self.parse_prefix()?;
@@ -189,19 +192,13 @@ impl<'de> Parser<'de> {
 
         match &token.kind {
             TokenType::Number(n) => Ok(Expr::Number(*n)),
-            TokenType::StringLiteral(s) => Ok(Expr::String(s.clone())),
-            TokenType::Identifier(s) => {
-                let mut expr = Expr::Identifier(s.clone());
-                if self.check(&TokenType::LParen) {
-                    expr = self.parse_call(expr)?;
-                }
-                Ok(expr)
-            },
+            TokenType::StringLiteral(s) => Ok(Expr::String(s.clone().parse()?)),
+            TokenType::Identifier(s) => Ok(Expr::Identifier(s.clone())),
             TokenType::LParen => {
                 let expr = self.parse_expression()?;
                 self.consume(TokenType::RParen)?;
                 Ok(Expr::Grouping(Box::new(expr)))
-            },
+            }
             TokenType::Minus => {
                 let operand = self.parse_precedence(Precedence::Unary)?;
                 Ok(Expr::Unary {
@@ -209,28 +206,16 @@ impl<'de> Parser<'de> {
                     operand: Box::new(operand),
                 })
             }
-            TokenType::Not => {
-                let operand = self.parse_precedence(Precedence::Unary)?;
-                Ok(Expr::Unary {
-                    operator: UnaryOp::Not,
-                    operand: Box::new(operand),
-                })
-            }
             _ => {
-                Err(ParseError::InvalidExpression {
+                Err(Report::new(ParseError::InvalidExpression {
                     span: SourceSpan::from(token.offset..token.offset + 1),
-                }.into())
+                }))
             }
         }
     }
 
     pub fn parse_infix(&mut self, left: Expr) -> Result<Expr> {
         let operator_token = self.advance_or_eof()?;
-
-        if operator_token.kind == TokenType::LParen {
-            return self.parse_call(left);
-        }
-
         let operator = Self::token_to_binary_op(&operator_token.kind);
         if let Some(op) = operator {
             let precedence = if op == BinaryOp::Assign {
@@ -244,15 +229,16 @@ impl<'de> Parser<'de> {
                 operator: op,
                 right: Box::new(right),
             })
+        } else if operator_token.kind == TokenType::LParen {
+            self.parse_call(left)
         } else {
-            Err(ParseError::InvalidExpression {
+            Err(Report::new(ParseError::InvalidExpression {
                 span: SourceSpan::from(operator_token.offset..operator_token.offset + 1),
-            }.into())
+            }))
         }
     }
 
     pub fn parse_call(&mut self, callee: Expr) -> Result<Expr> {
-        self.consume(TokenType::LParen)?;
         let mut arguments = Vec::new();
         if !self.check(&TokenType::RParen) {
             loop {
@@ -274,9 +260,9 @@ impl<'de> Parser<'de> {
             Some(t) => Ok(t.clone()),
             None => {
                 let source_len = self.source.len();
-                Err(ParseError::UnexpectedEof {
+                Err(Report::new(ParseError::UnexpectedEof {
                     span: SourceSpan::from(source_len..source_len),
-                }.into())
+                }))
             }
         }
     }
@@ -328,18 +314,17 @@ impl<'de> Parser<'de> {
                 return Ok(result);
             }
         }
-
         let current_token = self.peek();
         let source_len = self.source.len();
         let span = current_token.map_or_else(
             || SourceSpan::from(source_len..source_len),
             |token| SourceSpan::from(token.offset..token.offset + 1),
         );
-        Err(ParseError::UnexpectedToken {
+        Err(Report::new(ParseError::UnexpectedToken {
             expected: "identifier".to_string(),
             found: current_token.map_or("EOF".to_string(), |t| format!("{:?}", t.kind)),
             span,
-        }.into())
+        }))
     }
 
     pub fn tokens_match(expected: &TokenType, actual: &TokenType) -> bool {
@@ -361,66 +346,63 @@ impl<'de> Parser<'de> {
         false
     }
 
-    pub fn consume(&mut self, expected: TokenType) -> Result<&Token<'de>> {
-        if self.check(&expected) {
-            Ok(self.advance().unwrap())
+    pub fn consume(&mut self, token_type: TokenType) -> Result<()> {
+        if self.check(&token_type) {
+            self.advance();
+            Ok(())
         } else {
             let current_token = self.peek();
-            let source_len = self.source.len();
             let span = current_token.map_or_else(
-                || SourceSpan::from(source_len..source_len),
+                || SourceSpan::from(self.source.len()..self.source.len()),
                 |token| SourceSpan::from(token.offset..token.offset + 1),
             );
-            Err(ParseError::UnexpectedToken {
-                expected: format!("{:?}", expected),
+            Err(Report::new(ParseError::UnexpectedToken {
+                expected: format!("{:?}", token_type),
                 found: current_token.map_or("EOF".to_string(), |t| format!("{:?}", t.kind)),
                 span,
-            }.into())
+            }))
+        }
+    }
+
+    pub fn synchronize(&mut self) {
+        self.advance();
+        while !self.is_at_end() {
+            if let Some(prev) = self.previous() {
+                if prev.kind == TokenType::Semicolon {
+                    return;
+                }
+            }
+
+            match self.peek() {
+                Some(token) => match token.kind {
+                    TokenType::Identifier(ref s)
+                    if s == "fn" || s == "let" || s == "if" || s == "while" || s == "return" =>
+                        {
+                            return;
+                        }
+                    _ => {}
+                },
+                None => return,
+            }
+            self.advance();
         }
     }
 
     pub fn get_precedence(token_type: &TokenType) -> Precedence {
         match token_type {
+            TokenType::Equal => Precedence::Assignment,
             TokenType::Plus | TokenType::Minus => Precedence::Term,
             TokenType::Star | TokenType::Slash => Precedence::Factor,
-            TokenType::Equal => Precedence::Assignment,
-            TokenType::EqualEqual | TokenType::NotEqual => Precedence::Equality,
-            TokenType::Less | TokenType::Greater | TokenType::LessEq | TokenType::GreaterEq => Precedence::Comparison,
-            TokenType::And => Precedence::And,
-            TokenType::Or => Precedence::Or,
             TokenType::LParen => Precedence::Call,
-            TokenType::Number(_) | TokenType::Identifier(_) | TokenType::StringLiteral(_) => Precedence::Primary,
             _ => Precedence::None,
         }
     }
 
     pub fn has_prefix_rule(&self, token_type: &TokenType) -> bool {
-        matches!(token_type,
-            TokenType::Number(_) |
-            TokenType::Identifier(_) |
-            TokenType::Minus |
-            TokenType::Not |
-            TokenType::LParen |
-            TokenType::StringLiteral(_)
+        matches!(
+            token_type,
+            TokenType::Number(_) | TokenType::Identifier(_) | TokenType::LParen | TokenType::Minus | TokenType::StringLiteral(_)
         )
-    }
-
-    pub fn synchronize(&mut self) {
-        while !self.is_at_end() {
-            if let Some(prev) = self.previous() {
-                if matches!(prev.kind, TokenType::Semicolon) {
-                    return;
-                }
-            }
-            if let Some(current) = self.peek() {
-                if let TokenType::Identifier(s) = &current.kind {
-                    if matches!(s.as_str(), "let" | "fn" | "return" | "if" | "while") {
-                        return;
-                    }
-                }
-            }
-            self.advance();
-        }
     }
 
     pub fn token_to_binary_op(token_type: &TokenType) -> Option<BinaryOp> {
@@ -430,14 +412,6 @@ impl<'de> Parser<'de> {
             TokenType::Star => Some(BinaryOp::Multiply),
             TokenType::Slash => Some(BinaryOp::Divide),
             TokenType::Equal => Some(BinaryOp::Assign),
-            TokenType::EqualEqual => Some(BinaryOp::Equal),
-            TokenType::NotEqual => Some(BinaryOp::NotEqual),
-            TokenType::Less => Some(BinaryOp::Less),
-            TokenType::Greater => Some(BinaryOp::Greater),
-            TokenType::LessEq => Some(BinaryOp::LessEq),
-            TokenType::GreaterEq => Some(BinaryOp::GreaterEq),
-            TokenType::And => Some(BinaryOp::And),
-            TokenType::Or => Some(BinaryOp::Or),
             _ => None,
         }
     }
