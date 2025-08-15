@@ -1,65 +1,96 @@
+use miette::{Diagnostic, Report, SourceSpan};
+use thiserror::Error;
+
+#[derive(Error, Diagnostic, Debug)]
+pub enum AstError {
+    #[error("Invalid operation")]
+    #[diagnostic(code(ast::invalid_operation), help("This operation is not allowed here"))]
+    InvalidOperation {
+        #[label("invalid operation")]
+        span: SourceSpan,
+    },
+
+    #[error("Unexpected expression")]
+    #[diagnostic(code(ast::unexpected_expr))]
+    UnexpectedExpr {
+        #[label("here")]
+        span: SourceSpan,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
-    // Literal values
     Number(i64),
     String(String),
     Identifier(String),
-
-    // Binary operations: left op right
     Binary {
         left: Box<Expr>,
         operator: BinaryOp,
         right: Box<Expr>,
     },
-
-    // Unary operations: op operand
     Unary {
         operator: UnaryOp,
         operand: Box<Expr>,
     },
-
-    // Function calls: callee(args...)
     Call {
         callee: Box<Expr>,
         arguments: Vec<Expr>,
     },
-
-    // Grouping: (expression)
     Grouping(Box<Expr>),
+}
+
+impl Expr {
+    pub fn new_binary(
+        left: Expr,
+        operator: BinaryOp,
+        right: Expr,
+        span: SourceSpan,
+    ) -> Result<Self, Report> {
+        if let BinaryOp::Assign = operator {
+            if matches!(left, Expr::Number(_) | Expr::String(_) | Expr::Identifier(_)) {
+                return Ok(Expr::Binary {
+                    left: Box::new(left),
+                    operator,
+                    right: Box::new(right),
+                });
+            } else {
+                return Err(Report::new(AstError::InvalidOperation { span }));
+            }
+        }
+        Ok(Expr::Binary {
+            left: Box::new(left),
+            operator,
+            right: Box::new(right),
+        })
+    }
+
+    pub fn new_unary(operator: UnaryOp, operand: Expr, span: SourceSpan) -> Result<Self, Report> {
+        Ok(Expr::Unary {
+            operator,
+            operand: Box::new(operand),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
-    // Expression statement: expr;
     Expression(Expr),
-
-    // Block statement: { statements... }
     Block(Vec<Stmt>),
-
-    // Variable declaration: let name = value;
     VarDecl {
         name: String,
         initializer: Option<Expr>,
     },
-
-    // Function declaration: fn name(params...) { body }
     FnDecl {
         name: String,
         params: Vec<String>,
         body: Box<Stmt>,
     },
-
-    // Return statement: return expr?;
     Return(Option<Expr>),
-
-    // If statement: if condition { then_branch } else { else_branch }?
     If {
         condition: Expr,
         then_branch: Box<Stmt>,
         else_branch: Option<Box<Stmt>>,
     },
-
-    // While loop: while condition { body }
     While {
         condition: Expr,
         body: Box<Stmt>,
@@ -68,32 +99,25 @@ pub enum Stmt {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BinaryOp {
-    // Arithmetic
-    Add,        // +
-    Subtract,   // -
-    Multiply,   // *
-    Divide,     // /
-
-    // Assignment
-    Assign,     // =
-
-    // Comparison
-    Equal,      // ==
-    NotEqual,   // !=
-    Less,       // <
-    Greater,    // >
-    LessEq,     // <=
-    GreaterEq,  // >=
-
-    // Logical
-    And,        // &&
-    Or,         // ||
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Assign,
+    Equal,
+    NotEqual,
+    Less,
+    Greater,
+    LessEq,
+    GreaterEq,
+    And,
+    Or,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum UnaryOp {
-    Negate,     // -
-    Not,        // !
+    Negate,
+    Not,
 }
 
 impl std::fmt::Display for BinaryOp {
