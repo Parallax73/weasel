@@ -7,5 +7,3 @@ edition = "2024"
 miette = { version = "7.6.0", features = ["fancy"] }
 thiserror = "2.0.14"
 clap = { version = "4.5.45", features = ["derive"] }
-llvm-sys = "201.0.1"
-

@@ -82,11 +82,11 @@ fn main() -> Result<()> {
                 .parse()
                 .wrap_err("Parsing failed")?;
 
-            // Updated to use the new CodeGen constructor
-            let mut codegen = CodeGen::new("module")?;
+            let mut codegen = CodeGen::new();
             codegen.compile_ast(&stmts)?;
 
-            println!("Execution finished.");
+            codegen.run()?;
+
             Ok(())
         }
     }

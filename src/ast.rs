@@ -19,10 +19,41 @@ pub enum AstError {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum Type {
+    Int,
+    String,
+    Bool,
+    Float,
+}
+
+impl std::fmt::Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Type::Int => write!(f, "int"),
+            Type::String => write!(f, "string"),
+            Type::Bool => write!(f, "bool"),
+            Type::Float => write!(f, "float"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Number(i64),
     String(String),
+    Boolean(bool),
+    Float(f64),
+    Null,
     Identifier(String),
+    Array(Vec<Expr>),
+    TypedArray {
+        element_type: Type,
+        elements: Vec<Expr>,
+    },
+    Index {
+        array: Box<Expr>,
+        index: Box<Expr>,
+    },
     Binary {
         left: Box<Expr>,
         operator: BinaryOp,

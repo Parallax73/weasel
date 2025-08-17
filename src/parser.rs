@@ -1,8 +1,7 @@
 use crate::lex::{Token, TokenType};
-use crate::ast::{Expr, Stmt, BinaryOp, UnaryOp};
+use crate::ast::{Expr, Stmt, BinaryOp, UnaryOp, Type};
 use miette::{Diagnostic, Result, SourceSpan, Report};
 use thiserror::Error;
-
 
 #[derive(Error, Diagnostic, Debug)]
 pub enum ParseError {
@@ -37,6 +36,18 @@ pub enum ParseError {
         #[label("invalid expression")]
         span: SourceSpan,
     },
+
+    #[error("Type mismatch: expected {expected}, found {found}")]
+    #[diagnostic(
+        code(parser::type_mismatch),
+        help("All elements in a typed array must match the declared type")
+    )]
+    TypeMismatch {
+        expected: String,
+        found: String,
+        #[label("type mismatch here")]
+        span: SourceSpan,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -52,7 +63,6 @@ pub enum Precedence {
 pub struct Parser<'de> {
     tokens: Vec<Token<'de>>,
     current: usize,
-    source: &'de str,
 }
 
 impl<'de> Parser<'de> {
@@ -60,7 +70,6 @@ impl<'de> Parser<'de> {
         Self {
             tokens,
             current: 0,
-            source,
         }
     }
 
@@ -149,6 +158,16 @@ impl<'de> Parser<'de> {
             self.consume(TokenType::LBrace)?;
             let body = Box::new(self.parse_statement()?);
             Ok(Stmt::While { condition, body })
+        } else if self.check_identifier("print") {
+            self.advance();
+            self.consume(TokenType::LParen)?;
+            let expr = self.parse_expression()?;
+            self.consume(TokenType::RParen)?;
+            self.consume(TokenType::Semicolon)?;
+            Ok(Stmt::Expression(Expr::Call {
+                callee: Box::new(Expr::Identifier("print".to_string())),
+                arguments: vec![expr],
+            }))
         } else {
             let expr = self.parse_expression()?;
             self.consume(TokenType::Semicolon)?;
@@ -162,10 +181,11 @@ impl<'de> Parser<'de> {
 
     pub fn parse_precedence(&mut self, precedence: Precedence) -> Result<Expr> {
         let token = self.advance_or_eof()?;
+        let token_span = token.span();
 
         if !self.has_prefix_rule(&token.kind) {
             return Err(Report::new(ParseError::InvalidExpression {
-                span: SourceSpan::from(token.offset..token.offset + 1),
+                span: token_span,
             }));
         }
 
@@ -192,8 +212,12 @@ impl<'de> Parser<'de> {
 
         match &token.kind {
             TokenType::Number(n) => Ok(Expr::Number(*n)),
-            TokenType::StringLiteral(s) => Ok(Expr::String(s.clone().parse()?)),
+            TokenType::StringLiteral(s) => Ok(Expr::String(s.to_string())),
+            TokenType::Boolean(b) => Ok(Expr::Boolean(*b)),
+            TokenType::Null => Ok(Expr::Null),
             TokenType::Identifier(s) => Ok(Expr::Identifier(s.clone())),
+            TokenType::LBracket => self.parse_array(),
+            TokenType::Less => self.parse_typed_array(),
             TokenType::LParen => {
                 let expr = self.parse_expression()?;
                 self.consume(TokenType::RParen)?;
@@ -208,33 +232,142 @@ impl<'de> Parser<'de> {
             }
             _ => {
                 Err(Report::new(ParseError::InvalidExpression {
-                    span: SourceSpan::from(token.offset..token.offset + 1),
+                    span: token.span(),
                 }))
             }
         }
     }
 
+    pub fn parse_array(&mut self) -> Result<Expr> {
+        let mut elements = Vec::new();
+
+        if self.check(&TokenType::RBracket) {
+            self.advance();
+            return Ok(Expr::Array(elements));
+        }
+
+        loop {
+            elements.push(self.parse_expression()?);
+
+            if self.match_token(&[TokenType::Comma]) {
+                continue;
+            } else if self.check(&TokenType::RBracket) {
+                self.advance();
+                break;
+            } else {
+                return Err(Report::new(ParseError::UnexpectedToken {
+                    expected: "comma or ]".to_string(),
+                    found: format!("{:?}", self.peek().map(|t| &t.kind)),
+                    span: self.peek().map_or((0, 0).into(), |t| t.span()),
+                }));
+            }
+        }
+
+        Ok(Expr::Array(elements))
+    }
+
+    fn parse_typed_array(&mut self) -> Result<Expr> {
+        // Parse the type: <int>, <string>, etc.
+        let type_name = self.consume_identifier()?;
+        self.consume(TokenType::Greater)?;
+
+        let element_type = match type_name.as_str() {
+            "int" => Type::Int,
+            "string" => Type::String,
+            "bool" => Type::Bool,
+            "float" => Type::Float,
+            _ => return Err(Report::new(ParseError::InvalidExpression {
+                span: self.previous().unwrap().span(),
+            })),
+        };
+
+        // Now parse the array part: [1, 2, 3]
+        self.consume(TokenType::LBracket)?;
+
+        let mut elements = Vec::new();
+
+        if self.check(&TokenType::RBracket) {
+            self.advance();
+            return Ok(Expr::TypedArray { element_type, elements });
+        }
+
+        loop {
+            let element = self.parse_expression()?;
+
+            // STRICT type checking for typed arrays - this should cause compile-time errors
+            if !self.element_matches_type(&element, &element_type) {
+                return Err(Report::new(ParseError::TypeMismatch {
+                    expected: element_type.to_string(),
+                    found: format!("{:?}", element),
+                    span: self.previous().unwrap().span(),
+                }));
+            }
+
+            elements.push(element);
+
+            if self.match_token(&[TokenType::Comma]) {
+                continue;
+            } else if self.check(&TokenType::RBracket) {
+                self.advance();
+                break;
+            } else {
+                return Err(Report::new(ParseError::UnexpectedToken {
+                    expected: "comma or ]".to_string(),
+                    found: format!("{:?}", self.peek().map(|t| &t.kind)),
+                    span: self.peek().map_or((0, 0).into(), |t| t.span()),
+                }));
+            }
+        }
+
+        Ok(Expr::TypedArray { element_type, elements })
+    }
+
+    // Strict type checking helper for typed arrays
+    fn element_matches_type(&self, expr: &Expr, expected_type: &Type) -> bool {
+        match (expr, expected_type) {
+            (Expr::Number(_), Type::Int) => true,
+            (Expr::String(_), Type::String) => true,
+            (Expr::Boolean(_), Type::Bool) => true,
+            (Expr::Float(_), Type::Float) => true,
+            _ => false, // Strict checking - no mixed types allowed in typed arrays
+        }
+    }
+
     pub fn parse_infix(&mut self, left: Expr) -> Result<Expr> {
         let operator_token = self.advance_or_eof()?;
-        let operator = Self::token_to_binary_op(&operator_token.kind);
-        if let Some(op) = operator {
-            let precedence = if op == BinaryOp::Assign {
-                Precedence::Assignment
-            } else {
-                Self::get_precedence(&operator_token.kind)
-            };
-            let right = self.parse_precedence(precedence)?;
-            Ok(Expr::Binary {
-                left: Box::new(left),
-                operator: op,
-                right: Box::new(right),
-            })
-        } else if operator_token.kind == TokenType::LParen {
-            self.parse_call(left)
-        } else {
-            Err(Report::new(ParseError::InvalidExpression {
-                span: SourceSpan::from(operator_token.offset..operator_token.offset + 1),
-            }))
+
+        match &operator_token.kind {
+            TokenType::LBracket => {
+                let index = self.parse_expression()?;
+                self.consume(TokenType::RBracket)?;
+                Ok(Expr::Index {
+                    array: Box::new(left),
+                    index: Box::new(index),
+                })
+            }
+            TokenType::LParen => {
+                self.parse_call(left)
+            }
+            _ => {
+                let operator = Self::token_to_binary_op(&operator_token.kind);
+                if let Some(op) = operator {
+                    let precedence = if op == BinaryOp::Assign {
+                        Precedence::Assignment
+                    } else {
+                        Self::get_precedence(&operator_token.kind)
+                    };
+                    let right = self.parse_precedence(precedence)?;
+                    Ok(Expr::Binary {
+                        left: Box::new(left),
+                        operator: op,
+                        right: Box::new(right),
+                    })
+                } else {
+                    Err(Report::new(ParseError::InvalidExpression {
+                        span: operator_token.span(),
+                    }))
+                }
+            }
         }
     }
 
@@ -259,9 +392,8 @@ impl<'de> Parser<'de> {
         match self.advance() {
             Some(t) => Ok(t.clone()),
             None => {
-                let source_len = self.source.len();
                 Err(Report::new(ParseError::UnexpectedEof {
-                    span: SourceSpan::from(source_len..source_len),
+                    span: (0, 0).into(),
                 }))
             }
         }
@@ -315,10 +447,9 @@ impl<'de> Parser<'de> {
             }
         }
         let current_token = self.peek();
-        let source_len = self.source.len();
         let span = current_token.map_or_else(
-            || SourceSpan::from(source_len..source_len),
-            |token| SourceSpan::from(token.offset..token.offset + 1),
+            || (0, 0).into(),
+            |token| token.span(),
         );
         Err(Report::new(ParseError::UnexpectedToken {
             expected: "identifier".to_string(),
@@ -332,6 +463,7 @@ impl<'de> Parser<'de> {
             (TokenType::Number(_), TokenType::Number(_)) => true,
             (TokenType::Identifier(_), TokenType::Identifier(_)) => true,
             (TokenType::StringLiteral(_), TokenType::StringLiteral(_)) => true,
+            (TokenType::Boolean(_), TokenType::Boolean(_)) => true,
             _ => std::mem::discriminant(expected) == std::mem::discriminant(actual),
         }
     }
@@ -353,8 +485,8 @@ impl<'de> Parser<'de> {
         } else {
             let current_token = self.peek();
             let span = current_token.map_or_else(
-                || SourceSpan::from(self.source.len()..self.source.len()),
-                |token| SourceSpan::from(token.offset..token.offset + 1),
+                || (0, 0).into(),
+                |token| token.span(),
             );
             Err(Report::new(ParseError::UnexpectedToken {
                 expected: format!("{:?}", token_type),
@@ -393,7 +525,7 @@ impl<'de> Parser<'de> {
             TokenType::Equal => Precedence::Assignment,
             TokenType::Plus | TokenType::Minus => Precedence::Term,
             TokenType::Star | TokenType::Slash => Precedence::Factor,
-            TokenType::LParen => Precedence::Call,
+            TokenType::LParen | TokenType::LBracket => Precedence::Call,
             _ => Precedence::None,
         }
     }
@@ -401,7 +533,15 @@ impl<'de> Parser<'de> {
     pub fn has_prefix_rule(&self, token_type: &TokenType) -> bool {
         matches!(
             token_type,
-            TokenType::Number(_) | TokenType::Identifier(_) | TokenType::LParen | TokenType::Minus | TokenType::StringLiteral(_)
+            TokenType::Number(_)
+                | TokenType::Identifier(_)
+                | TokenType::LParen
+                | TokenType::LBracket
+                | TokenType::Less
+                | TokenType::Minus
+                | TokenType::StringLiteral(_)
+                | TokenType::Boolean(_)
+                | TokenType::Null
         )
     }
 
