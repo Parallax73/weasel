@@ -61,7 +61,7 @@ fn main() -> Result<()> {
                 .map_err(|e: LexError| Report::new(e))
                 .wrap_err("Tokenization failed")?;
 
-            let ast = MyParser::new(tokens, &file_content)
+            let ast = MyParser::new(tokens)
                 .parse()
                 .wrap_err("Parsing failed")?;
 
@@ -78,7 +78,7 @@ fn main() -> Result<()> {
                 .map_err(|e: LexError| Report::new(e))
                 .wrap_err("Tokenization failed")?;
 
-            let stmts = MyParser::new(tokens, &file_content)
+            let stmts = MyParser::new(tokens)
                 .parse()
                 .wrap_err("Parsing failed")?;
 

@@ -24,15 +24,19 @@ pub enum Type {
     String,
     Bool,
     Float,
+    Arr(Box<Type>),
+    Null,
 }
 
 impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Type::Int => write!(f, "int"),
-            Type::String => write!(f, "string"),
+            Type::String => write!(f, "str"),
             Type::Bool => write!(f, "bool"),
             Type::Float => write!(f, "float"),
+            Type::Arr(t) => write!(f, "arr<{}>", t),
+            Type::Null => write!(f, "null"),
         }
     }
 }
@@ -113,7 +117,8 @@ pub enum Stmt {
     },
     FnDecl {
         name: String,
-        params: Vec<String>,
+        params: Vec<(String, Type)>,
+        return_type: Type,
         body: Box<Stmt>,
     },
     Return(Option<Expr>),
@@ -126,6 +131,8 @@ pub enum Stmt {
         condition: Expr,
         body: Box<Stmt>,
     },
+    Break,
+    Continue,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -143,6 +150,10 @@ pub enum BinaryOp {
     GreaterEq,
     And,
     Or,
+    AddAssign,
+    SubtractAssign,
+    MultiplyAssign,
+    DivideAssign,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -160,13 +171,17 @@ impl std::fmt::Display for BinaryOp {
             BinaryOp::Divide => write!(f, "/"),
             BinaryOp::Assign => write!(f, "="),
             BinaryOp::Equal => write!(f, "=="),
-            BinaryOp::NotEqual => write!(f, "!="),
+            BinaryOp::NotEqual => write!(f, "not="),
             BinaryOp::Less => write!(f, "<"),
             BinaryOp::Greater => write!(f, ">"),
             BinaryOp::LessEq => write!(f, "<="),
             BinaryOp::GreaterEq => write!(f, ">="),
-            BinaryOp::And => write!(f, "&&"),
-            BinaryOp::Or => write!(f, "||"),
+            BinaryOp::And => write!(f, "and"),
+            BinaryOp::Or => write!(f, "or"),
+            BinaryOp::AddAssign => write!(f, "+="),
+            BinaryOp::SubtractAssign => write!(f, "-="),
+            BinaryOp::MultiplyAssign => write!(f, "*="),
+            BinaryOp::DivideAssign => write!(f, "/="),
         }
     }
 }
@@ -175,7 +190,7 @@ impl std::fmt::Display for UnaryOp {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             UnaryOp::Negate => write!(f, "-"),
-            UnaryOp::Not => write!(f, "!"),
+            UnaryOp::Not => write!(f, "not"),
         }
     }
 }

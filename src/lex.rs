@@ -15,34 +15,70 @@ pub enum LexerState {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum TokenType {
-
     Identifier(String),
 
-    // Start data types
+    // Data types
     Number(i64),
     String(String),
     Boolean(bool),
     Float(f64),
     Null,
 
-    //End data Types
+    // Keywords
+    If,
+    Else,
+    While,
+    Break,
+    Continue,
+    Fn,
+    Return,
+    Let,
+    True,
+    False,
+    Str,
+    Int,
+    Bool,
+    FloatType,
+    Arr,
+
+    // Operators
     Plus,
     Minus,
     Star,
     Slash,
     Equal,
+    EqualEqual,    // ==
+    NotEqual,      // not=
+    Less,
+    Greater,
+    LessEqual,     // <=
+    GreaterEqual,  // >=
+    And,           // and
+    Or,            // or
+    Not,           // not
+    LeftShift,     // <<
+    RightShift,    // >>
+    PlusEqual,     // +=
+    MinusEqual,    // -=
+    StarEqual,     // *=
+    SlashEqual,    // /=
+
+    // Delimiters
     LParen,
     RParen,
     LBrace,
     RBrace,
     LBracket,
     RBracket,
-    Less,
-    Greater,
     Comma,
     Semicolon,
+    Colon,         // :
+    Arrow,         // ->
+
     StringLiteral(Cow<'static, str>),
     Unknown(char),
+    Eof,
+    Bang,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -61,28 +97,24 @@ impl<'a> Token<'a> {
 
 #[derive(Error, Diagnostic, Debug)]
 pub enum LexError {
-    #[error("Unexpected character: {0}")]
-    #[diagnostic(code(lexer::unexpected_character))]
-    UnexpectedCharacter(char, #[label] SourceSpan),
+    #[error("Unterminated string")]
+    #[diagnostic(code(lex::unterminated_string), help("A string literal was not closed with a '\"'"))]
+    UnterminatedString(#[label("This string was not closed")] SourceSpan),
 
-    #[error("Unterminated string literal")]
-    #[diagnostic(code(lexer::unterminated_string))]
-    UnterminatedString(#[label] SourceSpan),
+    #[error("Unknown character '{0}'")]
+    #[diagnostic(code(lex::unknown_character))]
+    UnknownCharacter(char),
 
-    #[error("Invalid number format")]
-    #[diagnostic(code(lexer::invalid_number))]
-    InvalidNumber(#[label] SourceSpan),
-
-    #[error("Unknown symbol")]
-    #[diagnostic(code(lexer::unknown_symbol))]
-    UnknownSymbol(#[label] SourceSpan),
+    #[error("Invalid number")]
+    #[diagnostic(code(lex::invalid_number))]
+    InvalidNumber,
 }
 
 pub struct Lexer<'a> {
     input: &'a str,
-    tokens: Vec<Token<'a>>,
     position: usize,
     token_start: usize,
+    tokens: Vec<Token<'a>>,
     state: LexerState,
 }
 
@@ -90,11 +122,29 @@ impl<'a> Lexer<'a> {
     pub fn new(input: &'a str) -> Self {
         Self {
             input,
-            tokens: Vec::new(),
             position: 0,
             token_start: 0,
+            tokens: Vec::new(),
             state: LexerState::Start,
         }
+    }
+
+    pub fn tokenize(mut self) -> Result<Vec<Token<'a>>, LexError> {
+        while self.state != LexerState::Done {
+            match self.state {
+                LexerState::Start => {
+                    self.token_start = self.position;
+                    self.handle_start()?
+                }
+                LexerState::InNumber => self.handle_in_number(),
+                LexerState::InIdentifier => self.handle_in_identifier(),
+                LexerState::InString => self.handle_in_string()?,
+                LexerState::InComment => self.handle_in_comment(),
+                LexerState::InSymbol => self.handle_in_symbol(),
+                LexerState::Done => {}
+            }
+        }
+        Ok(self.tokens)
     }
 
     fn peek_char(&self) -> Option<char> {
@@ -116,22 +166,115 @@ impl<'a> Lexer<'a> {
         });
     }
 
-    fn handle_in_number(&mut self) -> bool {
-        if let Some(c) = self.peek_char() {
+    fn handle_start(&mut self) -> Result<(), LexError> {
+        if let Some(c) = self.advance_char() {
+            match c {
+                c if c.is_ascii_whitespace() => {}
+                c if c.is_ascii_digit() => {
+                    self.state = LexerState::InNumber;
+                    self.position -= c.len_utf8();
+                }
+                c if c.is_alphabetic() => {
+                    self.state = LexerState::InIdentifier;
+                    self.position -= c.len_utf8();
+                }
+                '\"' => self.state = LexerState::InString,
+                '/' => {
+                    if let Some(next) = self.peek_char() {
+                        if next == '/' {
+                            self.advance_char();
+                            self.state = LexerState::InComment;
+                        } else {
+                            self.add_token(TokenType::Slash);
+                        }
+                    } else {
+                        self.add_token(TokenType::Slash);
+                    }
+                }
+                _ => {
+                    self.state = LexerState::InSymbol;
+                    self.position -= c.len_utf8();
+                }
+            }
+        } else {
+            self.state = LexerState::Done;
+            self.add_token(TokenType::Eof);
+        }
+        Ok(())
+    }
+
+    fn handle_in_number(&mut self) {
+        while let Some(c) = self.peek_char() {
             if c.is_ascii_digit() {
                 self.advance_char();
-                return true;
+            } else if c == '.' {
+                self.advance_char();
+                while let Some(c) = self.peek_char() {
+                    if c.is_ascii_digit() {
+                        self.advance_char();
+                    } else {
+                        break;
+                    }
+                }
+                let text = &self.input[self.token_start..self.position];
+                let value = text.parse::<f64>().unwrap();
+                self.add_token(TokenType::Float(value));
+                self.state = LexerState::Start;
+                return;
+            } else {
+                break;
             }
         }
-        false
+        let text = &self.input[self.token_start..self.position];
+        let value = text.parse::<i64>().unwrap();
+        self.add_token(TokenType::Number(value));
+        self.state = LexerState::Start;
+    }
+
+    fn handle_in_identifier(&mut self) {
+        while let Some(c) = self.peek_char() {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                self.advance_char();
+            } else {
+                break;
+            }
+        }
+        let text = &self.input[self.token_start..self.position];
+        let kind = match text {
+            "if" => TokenType::If,
+            "else" => TokenType::Else,
+            "while" => TokenType::While,
+            "break" => TokenType::Break,
+            "continue" => TokenType::Continue,
+            "fn" => TokenType::Fn,
+            "let" => TokenType::Let,
+            "true" => TokenType::True,
+            "false" => TokenType::False,
+            "str" => TokenType::Str,
+            "int" => TokenType::Int,
+            "bool" => TokenType::Bool,
+            "float" => TokenType::FloatType,
+            "arr" => TokenType::Arr,
+            "not" => {
+                if self.peek_char() == Some('=') {
+                    self.advance_char(); 
+                    TokenType::NotEqual
+                } else {
+                    TokenType::Not
+                }
+            }
+            "and" => TokenType::And,
+            "or" => TokenType::Or,
+            _ => TokenType::Identifier(text.to_string()),
+        };
+        self.add_token(kind);
+        self.state = LexerState::Start;
     }
 
     fn handle_in_string(&mut self) -> Result<(), LexError> {
-        // We're at the opening quote, advance past it
         loop {
             if let Some(c) = self.advance_char() {
-                if c == '"' {
-                    // Extract the string content (between the quotes)
+                if c == '\"' {
                     let text = &self.input[self.token_start + 1..self.position - 1];
                     self.add_token(TokenType::StringLiteral(Cow::Owned(text.to_string())));
                     self.state = LexerState::Start;
@@ -145,6 +288,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
+
     fn handle_in_comment(&mut self) {
         loop {
             if let Some(c) = self.advance_char() {
@@ -153,99 +297,127 @@ impl<'a> Lexer<'a> {
                     return;
                 }
             } else {
-                self.state = LexerState::Start;
+                self.state = LexerState::Done;
+                self.add_token(TokenType::Eof);
                 return;
             }
         }
     }
 
-    pub fn tokenize(mut self) -> Result<Vec<Token<'a>>, LexError> {
-        while self.position < self.input.len() {
-            self.token_start = self.position;
-            let c = self.advance_char().unwrap();
-
-            match self.state {
-                LexerState::Start => match c {
-                    ' ' | '\t' | '\r' | '\n' => {}
-                    '+' => self.add_token(TokenType::Plus),
-                    '-' => self.add_token(TokenType::Minus),
-                    '*' => self.add_token(TokenType::Star),
-                    '/' => self.add_token(TokenType::Slash),
-                    '=' => self.add_token(TokenType::Equal),
-                    '(' => self.add_token(TokenType::LParen),
-                    ')' => self.add_token(TokenType::RParen),
-                    '{' => self.add_token(TokenType::LBrace),
-                    '}' => self.add_token(TokenType::RBrace),
-                    ',' => self.add_token(TokenType::Comma),
-                    ';' => self.add_token(TokenType::Semicolon),
-                    '[' => self.add_token(TokenType::LBracket),
-                    ']' => self.add_token(TokenType::RBracket),
-                    '<' => self.add_token(TokenType::Less),
-                    '>' => self.add_token(TokenType::Greater),
-                    '"' => {
-                        self.state = LexerState::InString;
-                        self.handle_in_string()?;
-                    },
-                    '0'..='9' => {
-                        self.state = LexerState::InNumber;
-                        while self.handle_in_number() {}
-                        self.state = LexerState::Start;
-                        let text = &self.input[self.token_start..self.position];
-                        match text.parse::<i64>() {
-                            Ok(num) => self.add_token(TokenType::Number(num)),
-                            Err(_) => {
-                                return Err(LexError::InvalidNumber(
-                                    (self.token_start, self.position - self.token_start).into(),
-                                ));
-                            }
+    fn handle_in_symbol(&mut self) {
+        if let Some(c) = self.advance_char() {
+            match c {
+                '=' => {
+                    if let Some(next) = self.peek_char() {
+                        if next == '=' {
+                            self.advance_char();
+                            self.add_token(TokenType::EqualEqual);
+                        } else {
+                            self.add_token(TokenType::Equal);
                         }
+                    } else {
+                        self.add_token(TokenType::Equal);
                     }
-                    'a'..='z' | 'A'..='Z' | '_' => {
-                        self.state = LexerState::InIdentifier;
-                        loop {
-                            if let Some(c) = self.peek_char() {
-                                if c.is_alphanumeric() || c == '_' {
-                                    self.advance_char();
-                                } else {
-                                    break;
-                                }
-                            } else {
-                                break;
-                            }
+                }
+                '<' => {
+                    if let Some(next) = self.peek_char() {
+                        if next == '=' {
+                            self.advance_char();
+                            self.add_token(TokenType::LessEqual);
+                        } else if next == '<' {
+                            self.advance_char();
+                            self.add_token(TokenType::LeftShift);
+                        } else {
+                            self.add_token(TokenType::Less);
                         }
-                        let text = &self.input[self.token_start..self.position];
-
-                        // Handle keywords
-                        let token_type = match text {
-                            "true" => TokenType::Boolean(true),
-                            "false" => TokenType::Boolean(false),
-                            "null" => TokenType::Null,
-                            _ => TokenType::Identifier(text.to_string()),
-                        };
-
-                        self.add_token(token_type);
-                        self.state = LexerState::Start;
+                    } else {
+                        self.add_token(TokenType::Less);
                     }
-                    _ => {
-                        return Err(LexError::UnexpectedCharacter(
-                            c,
-                            (self.token_start, c.len_utf8()).into(),
-                        ));
+                }
+                '>' => {
+                    if let Some(next) = self.peek_char() {
+                        if next == '=' {
+                            self.advance_char();
+                            self.add_token(TokenType::GreaterEqual);
+                        } else if next == '>' {
+                            self.advance_char();
+                            self.add_token(TokenType::RightShift);
+                        } else {
+                            self.add_token(TokenType::Greater);
+                        }
+                    } else {
+                        self.add_token(TokenType::Greater);
                     }
-                },
-                LexerState::InString => {
-                    // This case should not be reached since we handle strings immediately
-                    return Err(LexError::UnexpectedCharacter(
-                        c,
-                        (self.token_start, c.len_utf8()).into(),
-                    ));
                 }
-                LexerState::InComment => {
-                    self.handle_in_comment();
+                '!' => {
+                    self.add_token(TokenType::Bang);
                 }
-                _ => {}
+                '+' => {
+                    if let Some(next) = self.peek_char() {
+                        if next == '=' {
+                            self.advance_char();
+                            self.add_token(TokenType::PlusEqual);
+                        } else {
+                            self.add_token(TokenType::Plus);
+                        }
+                    } else {
+                        self.add_token(TokenType::Plus);
+                    }
+                }
+                '-' => {
+                    if let Some(next) = self.peek_char() {
+                        if next == '=' {
+                            self.advance_char();
+                            self.add_token(TokenType::MinusEqual);
+                        } else if next == '>' {
+                            self.advance_char();
+                            self.add_token(TokenType::Arrow);
+                        } else {
+                            self.add_token(TokenType::Minus);
+                        }
+                    } else {
+                        self.add_token(TokenType::Minus);
+                    }
+                }
+                '*' => {
+                    if let Some(next) = self.peek_char() {
+                        if next == '=' {
+                            self.advance_char();
+                            self.add_token(TokenType::StarEqual);
+                        } else {
+                            self.add_token(TokenType::Star);
+                        }
+                    } else {
+                        self.add_token(TokenType::Star);
+                    }
+                }
+                '/' => {
+                    if let Some(next) = self.peek_char() {
+                        if next == '=' {
+                            self.advance_char();
+                            self.add_token(TokenType::SlashEqual);
+                        } else {
+                            self.add_token(TokenType::Slash);
+                        }
+                    } else {
+                        self.add_token(TokenType::Slash);
+                    }
+                }
+                '(' => self.add_token(TokenType::LParen),
+                ')' => self.add_token(TokenType::RParen),
+                '{' => self.add_token(TokenType::LBrace),
+                '}' => self.add_token(TokenType::RBrace),
+                '[' => self.add_token(TokenType::LBracket),
+                ']' => self.add_token(TokenType::RBracket),
+                ',' => self.add_token(TokenType::Comma),
+                ';' => self.add_token(TokenType::Semicolon),
+                ':' => self.add_token(TokenType::Colon),
+                _ => self.add_token(TokenType::Unknown(c)),
             }
+        } else {
+            self.state = LexerState::Done;
+            self.add_token(TokenType::Eof);
         }
-        Ok(self.tokens)
+        self.state = LexerState::Start;
     }
 }
